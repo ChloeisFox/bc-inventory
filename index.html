@@ -274,6 +274,15 @@ dialog .wrap{padding:18px}
         <button class="btn wide" id="mdOut" type="button">Set out every book from this box</button>
         <button class="btn wide" id="mdPack" type="button" style="margin-top:8px">Pack up: put every book back in its box</button>
       </details>
+      <details class="more" id="boxPlanner" style="margin:0 0 10px"><summary>Plan my boxes</summary>
+        <p class="small">Tell me how many boxes you have and about how many books fit in one. Kids' books are grouped by age, everything else by genre.</p>
+        <div class="row2">
+          <label class="field"><span>Boxes</span><input id="bpCount" inputmode="numeric" placeholder="6"></label>
+          <label class="field"><span>Books per box</span><input id="bpCap" inputmode="numeric" placeholder="40"></label>
+        </div>
+        <button class="btn primary wide" id="bpGo" type="button">Suggest a plan</button>
+        <div id="bpOut"></div>
+      </details>
       <ul class="shelf" id="shelfList"></ul>
     </div>
   </section>
@@ -1163,6 +1172,93 @@ function renderMarks(){
   $$('[data-open]', body).forEach(li => li.onclick = () => openEditor(li.dataset.open));
 }
 
+/* ---------- box planner ---------- */
+const KIDS_GENRES = ["Children's", 'Middle Grade', 'Young Adult'];
+const KID_AGE_GROUPS = [
+  ['All ages', 'Kids: little ones (all ages)'],
+  ['PG', 'Kids: 8 and up (PG)'],
+  ['PG-13', 'Teens: 13 and up (PG-13)'],
+  ['R', 'Older teens (R)'],
+  ['Adult', 'Young adult, mature (Adult)']
+];
+let boxPlan = null;
+function kidAge(b){
+  if (b.age) return b.age;
+  return b.genre === "Children's" ? 'All ages' : b.genre === 'Middle Grade' ? 'PG' : 'PG-13';
+}
+/* Groups in packing order: kids youngest to oldest, then genres in the app's genre order. */
+function planGroups(list){
+  const groups = [];
+  KID_AGE_GROUPS.forEach(([age, label]) => {
+    const g = list.filter(b => KIDS_GENRES.includes(b.genre) && kidAge(b) === age);
+    if (g.length) groups.push({ key: 'kids:' + age, label, color: GENRE_COLOR[age === 'All ages' ? "Children's" : age === 'PG' ? 'Middle Grade' : 'Young Adult'], books: g });
+  });
+  GENRES.map(x => x[0]).filter(g => !KIDS_GENRES.includes(g)).forEach(genre => {
+    const g = list.filter(b => b.genre === genre);
+    if (g.length) groups.push({ key: genre, label: genre, color: GENRE_COLOR[genre], books: g });
+  });
+  const none = list.filter(b => !b.genre || !GENRE_COLOR[b.genre]);
+  if (none.length) groups.push({ key: 'none', label: 'No genre yet', color: '#E4E4E4', books: none });
+  groups.forEach(g => g.books.sort((a, b) => String(a.author || a.title).localeCompare(String(b.author || b.title))));
+  return groups;
+}
+function makePlan(count, cap){
+  const list = books.filter(b => b.status !== 'Sold');
+  const groups = planGroups(list);
+  const boxes = Array.from({ length: count }, (_, i) => ({ name: 'Box ' + (i + 1), books: [], parts: [] }));
+  let i = 0;
+  const room = k => cap - boxes[k].books.length;
+  const put = (k, g, items) => {
+    boxes[k].books.push(...items);
+    const last = boxes[k].parts[boxes[k].parts.length - 1];
+    if (last && last.key === g.key) last.n += items.length; else boxes[k].parts.push({ key: g.key, label: g.label, color: g.color, n: items.length });
+  };
+  const leftover = [];
+  for (const g of groups) {
+    let items = g.books.slice();
+    // Start a fresh box if this group would fit whole in one but not in the space left.
+    if (i < count && items.length <= cap && room(i) < items.length && boxes[i].books.length) i++;
+    while (items.length && i < count) {
+      const take = items.splice(0, room(i));
+      if (take.length) put(i, g, take);
+      if (items.length) i++;
+    }
+    if (items.length) leftover.push({ g, items });
+  }
+  // Second pass: tuck anything left into whatever space remains, rather than leave it out.
+  leftover.forEach(({ g, items }) => {
+    for (let k = 0; k < count && items.length; k++) { const take = items.splice(0, Math.max(0, room(k))); if (take.length) put(k, g, take); }
+    if (items.length) { boxes.overflow = (boxes.overflow || []).concat(items); }
+  });
+  return { boxes, total: list.length, cap, count, overflow: boxes.overflow || [] };
+}
+function renderPlan(){
+  const out = $('#bpOut');
+  if (!boxPlan) { out.innerHTML = ''; return; }
+  const { boxes, total, cap, count, overflow } = boxPlan;
+  const used = boxes.filter(b => b.books.length).length;
+  const moves = boxes.reduce((n, bx) => n + bx.books.filter(b => b.box !== bx.name).length, 0);
+  const need = Math.ceil(total / cap);
+  out.innerHTML = `
+    <div class="note">${total} books in stock. ${overflow.length ? `${count} boxes of ${cap} only hold ${count * cap}, so ${overflow.length} ${overflow.length === 1 ? 'book doesn\'t' : 'books don\'t'} fit. You'd need about ${need} boxes.` : `This uses ${used} of your ${count} boxes${used < count ? ', with ' + (count - used) + ' to spare' : ''}.`} ${moves ? moves + (moves === 1 ? ' book needs' : ' books need') + ' to move.' : 'Everything is already where it belongs.'}</div>
+    <ul class="marks">${boxes.map(bx => `
+      <li>
+        <div class="mrow"><b>${esc(bx.name)}</b><span class="small">${bx.books.length} ${bx.books.length === 1 ? 'book' : 'books'}</span></div>
+        <div class="tags" style="margin-top:6px">${bx.parts.length ? bx.parts.map(pt => `<span class="gbadge" style="--g:${pt.color}">${esc(pt.label)}, ${pt.n}</span>`).join('') : '<span class="small">Empty</span>'}</div>
+        ${bx.books.length ? `<details><summary class="small">See books</summary><ul class="listings">${bx.books.map(b => `<li><span>${esc(b.title)}${b.box && b.box !== bx.name ? ` <span class="warn">from ${esc(b.box)}</span>` : (!b.box ? ' <span class="warn">no box yet</span>' : '')}</span><span>${esc(b.id)}</span></li>`).join('')}</ul></details>` : ''}
+      </li>`).join('')}</ul>
+    ${overflow.length ? `<p class="small"><b>Didn't fit:</b> ${overflow.map(b => esc(b.title)).join(', ')}</p>` : ''}
+    ${moves ? `<button class="btn primary wide" id="bpApply" type="button" style="margin-top:12px">Use this plan</button>
+    <p class="small">This updates each book's storage box. Books out on a table stay out, and go into their new box when you pack up.</p>` : ''}`;
+  const ap = $('#bpApply');
+  if (ap) ap.onclick = () => {
+    if (!confirm('Update the storage box for ' + moves + ' books?')) return;
+    boxPlan.boxes.forEach(bx => bx.books.forEach(b => { if (b.box !== bx.name) localUpdate(b, { box: bx.name }); }));
+    toast('Box plan saved');
+    boxPlan = makePlan(count, cap); renderPlan();
+  };
+}
+
 /* ---------- sales tax ---------- */
 function taxSettings(){
   let t = {};
@@ -1420,6 +1516,15 @@ $('#mdOut').addEventListener('click', () => {
   if (!list.length) { toast('Everything from ' + box + ' is already out.'); return; }
   list.forEach(b => localUpdate(b, { where: 'Out', display: spot }));
   toast(list.length + ' books from ' + box + ' are out on ' + spot);
+});
+try { const bp = JSON.parse(localStorage.getItem('bc_boxplan') || '{}'); if (bp.count) $('#bpCount').value = bp.count; if (bp.cap) $('#bpCap').value = bp.cap; } catch(e){}
+$('#bpGo').addEventListener('click', () => {
+  const count = parseInt($('#bpCount').value, 10), cap = parseInt($('#bpCap').value, 10);
+  if (!(count > 0)) { toast('How many boxes do you have?'); return; }
+  if (!(cap > 0)) { toast('About how many books fit in one box?'); return; }
+  if (!books.some(b => b.status !== 'Sold')) { toast('Add some books first.'); return; }
+  localStorage.setItem('bc_boxplan', JSON.stringify({ count, cap }));
+  boxPlan = makePlan(count, cap); renderPlan();
 });
 $('#mdPack').addEventListener('click', () => {
   const list = books.filter(b => b.status !== 'Sold' && b.where === 'Out');
